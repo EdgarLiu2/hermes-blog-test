@@ -1,0 +1,12 @@
+---
+title: "Second Post — Testing PR Workflow"
+date: 2026-08-11
+tags: ["workflow", "pr", "hugo"]
+author: "EdgarLiu2"
+---
+
+## PR Workflow Test
+
+This post was added via a feature branch, submitted as a Pull Request, and merged into main.
+
+This validates the complete Git workflow for Hugo blog content publishing.
