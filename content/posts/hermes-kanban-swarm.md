@@ -1,144 +1,142 @@
 ---
-title: "Hermes Agent Kanban Swarm 功能解析——一个不引入第二个调度器的多智能体编排方案"
+title: "Hermes Agent Kanban Swarm 功能解析：以一块 SQLite 看板驱动的多智能体编排"
 date: 2026-08-14
-tags: ["hermes-agent", "kanban", "multi-agent", "orchestration", "ai"]
-author: "EdgarLiu2"
+tags: [Hermes, Kanban, Multi-Agent, Swarm, NousResearch]
+author: EdgarLiu2
 ---
 
-# Hermes Agent Kanban Swarm 功能解析——一个不引入第二个调度器的多智能体编排方案
+# Hermes Agent Kanban Swarm 功能解析
 
-> 面向 AI 开发者 / 多智能体系统工程师
+## 核心发现（TL;DR）
 
-## 一、先厘清版本：Swarm 到底属于哪个版本
+Kanban Swarm v1 是 Hermes Agent 在 v0.15.0（"Velocity Release"，2026-05-28）引入的多智能体编排原语：它**不引入新的调度器**，而是把一棵"并行 worker → 门控 verifier → 门控 synthesizer"的任务图，以一条命令原子地写进既有的 SQLite Kanban 内核，并复用看板注释作为跨 worker 的"共享黑板"。整个 swarm 的持久性、可见性、重试与审计全部复用看板的既有机制。
 
-Kanban 多智能体看板是 Hermes 在 v0.12.0 引入的基础能力；Kanban Swarm v1 则于 v0.15.0（2026-05-28）正式落地。随后 v0.16.0（2026-06-05，代号 "The Surface Release"）的增量集中在原生桌面 App 与浏览器管理面板——包括看板页的图形化编排界面（lanes by profile、Auto/Manual 编排、一键 Decompose、Profile Builder）——而非 Swarm 本身。所以严格讲，"v0.16 的 Kanban Swarm"应表述为"v0.15 引入、v0.16 图形化增强的 Swarm"。
+## 一、背景：为什么需要 Swarm
 
-## 二、要解决的问题：多智能体协调的基准缺失
+Hermes Agent 早已具备 `delegate_task` 子代理（fork→join 的 RPC 式调用），但它有两个边界：子代理是匿名的、无持久记忆的进程内调用，且父进程退出即丢失。要支撑"多个具名 Agent 像真实团队一样协作"，需要的是**持久任务队列 + 状态机**，而不是一次函数调用。
 
-主流基准（SWE-bench、GAIA、AgentBench）衡量的都是单个 agent 在隔离环境中的能力。一旦把两个 agent 放进同一间屋子做交接，指标就崩了；放十个带依赖关系的 agent，就演变成事故。
+这正是 Kanban 的定位：`~/.hermes/kanban.db` 里的每一行是一个任务，每一次 handoff 是一行任何人可读可写的记录，每一个 worker 是一个带独立身份、持久记忆的完整 OS 进程。而 **Swarm** 就是在这块看板上、由一次 `hermes kanban swarm` 命令生成的一整套编排图——它不是独立子系统，而是看板能力"长出来"的产物。
 
-业界主流应对是"向上加层"：
+## 二、拓扑结构与数据模型
 
-- **LangGraph**：为工作流显式定义节点与边的状态机
-- **CrewAI**：带 manager 的角色制团队
-- **AutoGen**：基于对话协议的协商
-- **xAI Grok 4.20**：把协调逻辑直接编译进模型权重（无法复刻）
-
-这些方案共同的前提假设是：agent 协调需要一层全新基础设施——一个悬在所有 agent 之上、管理它们的新调度器。
-
-Hermes Kanban Swarm 走了相反的路：它不再新增一层，而是把任务图写进已经存在的看板内核里。
-
-## 三、核心抽象：Kanban 本身就是协调基座
-
-Hermes Kanban 是一块跨所有 profile 共享的持久化任务板，后端是 SQLite（`~/.hermes/kanban.db`）。
-
-- **任务（Task）** = 一行：标题、body、assignee（一个 profile 名）、状态（triage|todo|ready|running|blocked|review|done|archived）
-- **链接（Link）** = 一行父→子依赖；父任务全部 done 后，子任务自动从 todo 提升为 ready
-- **注释（Comment）** = agent 间协议：下一个接手任务的 agent 会读到完整线程
-- **工作区（Workspace）** = 每个 worker 独立的隔离目录，scratch 型在任务完成即销毁
-- **调度器（Dispatcher）** = 网关内置的长期循环（默认 60s 一次 tick），负责认领任务、拉起对应 profile 的完整 Hermes 进程
-
-关键点：worker 不是内存里的子线程，而是独立的完整 OS 进程，有自己独立的身份、工具集、skills 与记忆。
-
-## 四、Swarm v1：279 行 Python，不引入第二个调度器
-
-Swarm 模块的 docstring 写得很直白：
-
-> "This module intentionally does not introduce a second scheduler. It writes a small task graph into the existing Kanban kernel."
-
-这句话信息量很大。"intentionally"意味着他们考虑过替代方案并否决了；"existing Kanban kernel"意味着他们审视了生产环境里已经在跑的东西，问它能否吸收新能力而无需新服务。
-
-### 4.1 拓扑结构
-
-Swarm 一次命令生成完整任务图：
+`kanban_swarm.py`（约 390 行）用 `create_swarm()` 一次性构造如下任务图：
 
 ```
-                Swarm Root(共享黑板)
-                       │
-      ┌─────────┬──────┴───────┬─────────┐
-   Worker 1   Worker 2    Worker 3   ...
-      (并行)    (并行)      (并行)
-        └────────┴──────┬──────┘
-                    Verifier
-                   (门控:等全部)
-                        │
-                   Synthesizer
-                   (写最终输出)
+planning root（立即 completed，兼作共享黑板）
+    ├─ N 个并行 specialist worker（ready）
+    └─ verifier（todo，等所有 worker 完成后才 promoted）
+         └─ synthesizer（todo，等 verifier 通过后才 promoted）
 ```
 
-- 每个 worker 跑在指定 profile 下：researcher 带 web 研究工具，coder 带终端与文件访问，各自在独立 scratch 工作区
-- Verifier 审查每个 worker 的输出并握持门（gate）；必须携带 metadata `{"gate": "pass"}` 完成，才允许 Synthesizer 继续；证据不足则 block 并精确列出缺什么
-- Synthesizer 在所有 worker 通过门控后汇总成最终交付物
+对应的四个数据类 / 返回结构：
 
-### 4.2 Blackboard：一个 JSON.stringify 的黑板协议
+- `SwarmWorkerSpec`：单个 worker 卡片的规格（profile、title、body、skills、priority、max_runtime_seconds）。
+- `SwarmCreated`：创建结果（root_id、worker_ids、verifier_id、synthesizer_id），带 `as_dict()` 供 CLI `--json` 输出。
+- **Root**：以 `initial_status="blocked"` 创建，随后在同一个写事务里做一次 `blocked → done` 的 CAS 翻转（`UPDATE tasks SET status='done' WHERE id=? AND status='blocked'`），并写入拓扑 metadata。这样并行 worker 立即 `ready` 可被调度，root 同时保留为共享黑板与审计锚点。
+- **Verifier 卡片**：`parents=worker_ids`（门控在全部 worker 完成），自动挂载 `requesting-code-review` 技能，body 要求"gate"：证据充分才以 `{"gate":"pass"}` 完成，否则 block 并列出缺失工作。
+- **Synthesizer 卡片**：`parents=[verifier]`（门控在 verifier 通过），自动挂载 `humanizer` 技能。
 
-Worker 间通信的共享黑板是刻意低技术的：在 root 卡上写带前缀标记的结构化 JSON 注释。
+依赖通过 `task_links`（parent→child）表达，dispatcher 在**所有父任务 done** 后才把 `todo → ready`。因此天然形成"workers 并行 → verifier 收口 → synthesizer 交付"的流水线，且不写一行额外调度逻辑。
 
-- `post_blackboard_update`：把一个 JSON 块写进注释
-- `latest_blackboard`：读回全部注释并按 key 合并，后者覆盖前者，并维护 `_authors` 映射记录谁写了什么
+## 三、共享黑板：刻意低科技
 
-所有状态都活在现有 dashboard、notifier、CLI、dispatcher 已能读写的行里——没有新存储，没有新协议。
+多智能体系统最容易踩的坑是"引入第二个协调服务"。Swarm 的黑板刻意保持低科技：
 
-### 4.3 CLI 用法
+- 黑板就是**root 任务上的结构化 JSON 注释**，统一前缀 `[swarm:blackboard] `。
+- `post_blackboard_update()` 把 `{"key", "value"}` 序列化后作为一条普通注释追加；`latest_blackboard()` 读取并**合并**所有该前缀注释，同名 key 以"后写覆盖先写"，并通过 `_authors` 记录胜出值的作者供追溯。
+- `_swarm_context()` 会给每个 worker 的 body 追加一段 "## Swarm protocol"：声明 root/黑板 id、要求先读兄弟/父任务 handoff、把机器可读事实放进完成 metadata、把跨 worker 备注写成结构化注释。
+
+结果：**所有状态都落在既有的 `task_comments` / `task_events` 行里**，因此 dashboard、notifier、`/kanban` 斜杠命令、dispatcher 无需新服务即可继续工作。这是"thin helpers"设计哲学的体现——模块 docstring 明确写道：本模块"intentionally does not introduce a second scheduler"。
+
+## 四、原子性与事务细节
+
+`create_swarm()` 最精巧的一点是**整体原子提交**：
+
+1. 所有卡片在 `kb.write_txn(conn)` 这个外层写事务内创建。
+2. Root 的激活不是调用 `kb.complete_task()`——那个助手会自己开事务并触发 post-commit 副作用（工作区清理、失败计数清零、`recompute_ready`），若在外层事务里执行会在回滚时出错。因此改用内联的 `_activate_root_inline()`：只做最小持久写（CAS 翻转 + 写 run 行 + 追加 completed 事件），把 `recompute_ready` 留给外层提交之后。
+3. 提交成功后，在事务外调用 `recompute_ready()` 提升 root 的子任务，并触发 `kanban_task_completed` 生命周期钩子。
+
+这意味着**调度器与 dashboard 读者要么看不到任何新 swarm，要么看到完整拓扑**，绝不会看到半链接的 root/worker/verifier 图。
+
+此外支持**幂等**：若传入 `idempotency_key` 且 root 已存在，`_create_swarm_uncommitted` 会从 root 的最新黑板里恢复既有拓扑（worker_ids/verifier_id/synthesizer_id），而不是重复创建整张图。
+
+## 五、CLI 用法
 
 ```bash
-hermes kanban swarm "设计一个多区域故障转移方案" \
-  --worker researcher:调研可用性:SRE \
-  --worker architect:设计架构 \
+hermes kanban swarm "Design a multi-region failover plan" \
+  --worker researcher:"调研" \
+  --worker architect:"架构" \
+  --worker sre:"运维" \
   --verifier reviewer \
-  --synthesizer writer
+  --synthesizer writer \
+  --json
 ```
 
-返回四个任务 ID（root / workers / verifier / synthesizer），然后走人。生成的图原子提交：dispatcher 与 dashboard 要么看到完整的 swarm，要么完全看不到，绝不会看到半连接的 root/worker/verifier 图。
+- `--worker` 可重复，格式为 `PROFILE:TITLE[:SKILL,SKILL]`，由 `parse_worker_arg()` 解析。
+- `--verifier` / `--synthesizer` 必填（指派 profile）。
+- 可选 `--tenant`、`--priority`、`--created-by`、`--idempotency-key`、`--json`。
 
-现有调度器会在下一个 tick（最迟 60 秒）把 worker 任务认领，按对应 profile 拉起完整进程。Verifier 与 Synthesizer 保持在 todo，直到所有 worker 都 done 才被提升。
+创建后由 dispatcher 正常调度：workers 并行跑，verifier 等全部完成才醒来，synthesizer 等 verifier 判定干净后才醒来。
 
-## 五、Swarm 与 delegate_task 的本质区别
+## 六、发布脉络与演进
 
-| 维度 | delegate_task | Kanban Swarm |
-|------|---------------|--------------|
-| 形态 | RPC 调用（fork → join） | 持久化消息队列 + 状态机 |
-| 父 agent | 阻塞等子返回 | create 后即失联 |
-| 子身份 | 匿名子 agent | 带持久记忆的命名 profile |
-| 可恢复性 | 失败即失败 | block → unblock 可重跑；崩溃可回收 |
-| 人机协作 | 不支持 | 任意时刻可评论 / unblock |
-| 审计轨迹 | 上下文压缩即丢失 | SQLite 里永久可查 |
-| 协调模式 | 层级（调用方→被调方） | 对等（任意 profile 可读写任意任务） |
+- **v0.15.0（2026-05-28，Velocity Release）**：官方 release notes 描述 Kanban 成长为"real multi-agent platform——104 个 PR 端到端"，其中明确列出 `hermes kanban swarm` 一条命令创建完整 Swarm v1 图（root、并行 workers、门控 verifier、门控 synthesizer、共享黑板），并同期加入 triage 自动分解、per-task 模型覆盖、worktree 管理、计划启动时间、claim TTL、重试指纹、陈旧任务检测、respawn 守卫与 `/workers/active`、`/runs/{id}`、`/inspect` 等 worker 可见性端点。
+- **v0.16.0（2026-06-05，Surface Release）**：头条是原生桌面 App 与浏览器管理后台；对 Swarm 本身无破坏性改动，但引入了 `environments:` 相关性门（把 `kanban`/`docker`/`s6` 等技能从无关用户的索引里剔除，按需才加载），并在技能精简中保留了核心编排能力。
 
-一句话：delegate_task 是函数调用，Kanban 是工作队列，每次交接都是一行任何 profile（或人）都能看见和编辑的记录。
+GitHub issue #35600 则提出了下一步演进方向：`/swarm` 斜杠命令（Tier 2 是现有 CLI 手动控制，Tier 3 是 `kanban decompose` + 自动派发的全自动路径），让"在会话内用自然语言触发 swarm"成为可能。issue 里对 Swarm v1 的评价是：**"Hermes 最强大的多智能体编排原语"**，但 UX 门槛较高。
 
-## 六、Swarm 规避的三个失败模式
+## 七、一次 Swarm 的完整生命周期（结合本次写作实例）
 
-1. **渐进式精度崩塌（progressive accuracy collapse）**。OpenAI Swarm 因无状态而精度从 84% 塌到 0%。Kanban Swarm 天然有状态：每次交接是 SQLite 行，每次状态迁移是行更新。Verifier 门控保证 gatekeeper 不显式放行前，什么都不往下走——不存在 agent 默默确认子任务然后消失的路径，因为状态机强制只有过门才算完成。
+为了直观展示 Swarm 如何工作，下面以本篇文章的实际编排为例（本文正是由 Swarm v1 产出的）：
 
-2. **重启即失联**。LangGraph 状态机崩溃丢内存态；CrewAI 委托超时让父 agent 空等。Kanban Swarm 全部写入持久化 SQLite：dispatcher 重启、机器重启、worker 被杀重拉，状态都还在，任务还在板上，worker 从断点续跑。
+1. **创建**：`hermes kanban swarm <goal> --worker researcher:"调研并写作" --verifier reviewer --synthesizer publisher`。`create_swarm()` 在一个写事务里建好 root、1 个 worker、verifier、synthesizer 四张卡，root 被 CAS 置为 `done`，worker 立即 `ready`。
+2. **黑板上板**：`post_blackboard_update()` 在 root 上追加 `{"key":"topology","value":{...}}` 注释，记录 root/worker/verifier/synthesizer 的 id 与 goal——任何后续 worker 读 root 注释即可恢复全局视图。
+3. **worker 派发**：dispatcher 检测到 worker `ready`，以 researcher profile 拉起一个完整 OS 进程，注入 `kanban_*` 工具集与 `HERMES_KANBAN_BOARD`。worker 先读 root 黑板与父任务 handoff，再调研源码/文档，最后把成品写入共享工作区 `hermes-kanban-swarm.md`，并以 `kanban_complete` 交付（summary + 机器可读 metadata）。
+4. **门控释放**：worker 完成后，verifier 因 `parents` 全部 done 而从 `todo` 提升为 `ready`，被 reviewer profile 派发。它逐条核对技术事实（如"不引入第二调度器"、"黑板是 JSON 注释"、"原子提交"等是否与源码一致），证据充分才以 `{"gate":"pass"}` 完成；否则 `kanban_block` 列出缺失工作，worker 会被重新派发修正。
+5. **合成交付**：verifier 通过后，synthesizer（publisher）才被释放，把已验证的 worker 输出加工为最终文章交付给读者。
 
-3. **人工审查不是一等公民**。Verifier 门不只是给自动化 agent 用的——人可以 unblock 一个被卡住的 verifier 任务、往黑板加注释、把任务从 todo 提升到 ready。看板对人和模型是同一块板。关键洞见：Kanban 在 AI agent 出现前几十年就是为人类任务管理设计的，这个抽象本来就人机兼容。
+这套流程正是拓扑即门控的体现：**不需要任何外部编排脚本**，光靠 `task_links` 的 parent 依赖与 dispatcher 的状态提升，就完成了"并行研究 → 复核 → 合成"的三阶段流水线。
 
-## 七、更深一层的架构哲学
+## 八、Swarm 协议与 worker 生命周期
 
-一次 `kanban swarm` 命令 = root 卡 + N 并行 worker 卡 + 一个 gated verifier 卡 + 一个 synthesizer 卡，黑板是存成 JSON 注释的结构化数据。
+每个被派发的 worker 会通过 `_swarm_context()` 在 body 末尾自动获得一段标准的"## Swarm protocol"：
 
-> 一块看板就是一台状态机：行是工作项，列是状态迁移，依赖是行间的边。这些性质不是为 AI agent 设计的——它们是为 1970 年代的制造业供应链设计的。它们能通用，是因为协调问题本身是通用的。
+1. 声明 `Swarm root / shared blackboard` 的任务 id（例如 `t_a1491a6c`）。
+2. 要求先读兄弟/父任务 handoff 再动手（`Read sibling/parent handoffs from Kanban context before working`）。
+3. 把机器可读事实放进 completion metadata。
+4. 把跨 worker 备注以结构化注释写到 root 任务上。
 
-多智能体行业在"向上建"：加层、加运行时、加抽象。Hermes Kanban Swarm 走了侧路：看板已经是一个协调基座，只需要把正确的拓扑写进去。
+运行时层面，worker 由 dispatcher 以完整 OS 进程拉起，带 `HERMES_KANBAN_BOARD` 环境变量锁定所属看板；它在看板里通过 `kanban_*` 工具集（`kanban_show`、`kanban_complete`、`kanban_block`、`kanban_heartbeat`、`kanban_comment` 等）读写任务。心跳机制保证长任务不被误回收：长时间运行的 worker 需周期调用 `kanban_heartbeat`，否则 dispatcher 在超时后会把任务重新入队。worker 完成后，其 `summary` 与 `metadata` 成为下游 verifier 的输入——这正是"机器可读事实进 metadata"这一约定的用意。
 
-## 八、已知边界与演进方向
+## 九、与 `delegate_task` 的对比
 
-- **无 /swarm 斜杠命令**：目前调用 swarm 仍是显式 CLI 操作。社区提案（issue #35600）想把 /swarm 变成会话内三层的入口（Tier 1 全自动 / Tier 2 CLI 手动 / Tier 3 完全自治），但该 PR 尚未合入主线。
-- **自动分解是另一套机制**：triage 的 auto-decompose 产生的是扁平依赖树，不是带 verifier + synthesizer 的门控流水线——两者互补，不重合。
-- **自定义 verifier/synthesizer**：issue #34273 提议让 verifier/synthesizer 携带自定义 body 与 skills（例如 verifier 用 requesting-code-review skill），支持更细粒度的门控质量。
+| 维度 | `delegate_task` | Kanban Swarm |
+|---|---|---|
+| 形态 | RPC 调用（fork→join） | 持久队列 + 状态机 |
+| 父进程 | 阻塞等子返回 | create 后即返回、fire-and-forget |
+| 子身份 | 匿名子代理 | 具名 profile，带持久记忆 |
+| 可恢复性 | 失败即失败 | block→unblock 重跑、崩溃→reclaim |
+| 人工介入 | 不支持 | 任意时刻 comment/unblock |
+| 审计 | 上下文压缩即丢失 | SQLite 持久行，永久可查 |
+| 协调 | 层级（调用→被调） | 对等，任何 profile 可读写任何任务 |
 
-## 九、结论
+**一句话区分**：`delegate_task` 是一次函数调用；Kanban（及其 Swarm）是一个工作队列，每一次 handoff 都是任何 profile（或人类）可见、可编辑的一行。二者可共存——一个 kanban worker 在运行中内部也可能调用 `delegate_task`。
 
-Hermes Kanban Swarm 的核心论断是：agent 协作不需要新的协调协议，需要的是一套带门控、持久化、人机可见的任务管理系统——这种东西几十年前就有了，只是我们一直在重复造新基础设施，而不是承认已有的基础设施够用。
+## 十、设计启示
 
-279 行 Python，没有第二个调度器，一个 JSON.stringify 的黑板。它能工作，是因为最难的问题早就被解决了，我们只是忘了去看。
+1. **复用优于新建**：Swarm 没有造第二套调度、存储或 UI，全部建立在看板的链接、注释、事件之上，换来的是零新增运维面。
+2. **门控即拓扑**：verifier/synthesizer 的先后关系直接用 parent 依赖表达，省去了手写编排状态机。
+3. **原子提交**：一整棵图要么全出、要么全不出，避免了半初始化的编排状态。
+4. **可追溯**：黑板注释带作者、事件全落库，天然支持审计与人工介入（任意时刻 comment/unblock）。
+5. **边界清醒**：看板只负责"下一个该捡什么、有没有人在做"这一件事——它不会把拆分糟糕的目标变好，共享隐状态的子任务仍会互相打架。
+6. **演进克制**：v1 刻意保持"薄"——不做 `/swarm` 斜杠命令，不做自动分解路由，这些留给 v0.16 之后的演进（如 issue #35600 的 Tier 3 提案）。先让原语稳，再谈便利。
 
-## 主要来源
+## 信息来源
 
-- Hermes Agent 官方文档 — Kanban 参考页：hermes-agent.nousresearch.com/docs/user-guide/features/kanban
-- Kanban 教程：hermes-agent.nousresearch.com/docs/user-guide/features/kanban-tutorial
-- GitHub Releases — v0.15.0 / v0.16.0 发布说明
-- magnus919.com —《The Smartest Agent Orchestration Framework Doesn't Have a Scheduler》(2026-05-30)
-- GitHub issue #35600（/swarm 命令提案）、#34273（自定义 verifier/synthesizer）
+- 本地源码：`~/.hermes/hermes-agent/hermes_cli/kanban_swarm.py`（Swarm v1 全部实现，390 行）
+- 官方文档：https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban （Kanban Swarm 拓扑助手章节）
+- 官方文档：https://hermes-agent.nousresearch.com/docs/user-guide/features/kanban-tutorial （四则用户故事）
+- v0.15.0 Release Notes：https://github.com/NousResearch/hermes-agent/releases/tag/v2026.5.28 （"Velocity Release"，Swarm v1 随 104 PR 落地）
+- v0.16.0 Release Notes：https://github.com/NousResearch/hermes-agent/releases/tag/v2026.6.5 （"Surface Release"，environments 相关性门）
+- GitHub Issue #35600：https://github.com/NousResearch/hermes-agent/issues/35600 （`/swarm` 斜杠命令演进提案）
+- 本地文档：`~/.hermes/hermes-agent/website/docs/user-guide/features/kanban.md`
