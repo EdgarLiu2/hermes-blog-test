@@ -24,18 +24,9 @@
 - 所有代码注释都使用中文
 
 ## 开发规范
-- 每次有新需求时，都要自动创建一下新分支，所有开发都基于新的分支进行
+- 每次有新需求时，都要自动创建一下新分支，所有开发都基于新的分支进行。这些因开发需求创建的新分支，在合入main后，远程的新分支都保留，不要删除。
 - 需求开发完成后，自动补充单元测试代码，预期所有单元测试都可以跑通，且保证代码覆盖率在80%以上
 - 需求开发完成后，确保项目可以通过所有lint检查，并能够成功编译打包
 - 最后以DEV模式运行项目，并自动打开首页
 - 待用户完成需求验收后，确定需求可以上线后，再将需求分支合入main分支，并同步更新远程的main。
 
-<!-- BEGIN:nextjs-agent-rules -->
-
-# This is NOT the Next.js you know
-
-This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
-
-This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
-
-<!-- END:nextjs-agent-rules -->
