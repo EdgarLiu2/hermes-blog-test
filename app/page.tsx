@@ -9,53 +9,43 @@ function cleanDescription(s: string): string {
 export default function Home() {
   const posts = getAllPosts();
   return (
-    <main style={{ maxWidth: 720, margin: "0 auto", padding: "3rem 1.5rem" }}>
-      <header style={{ marginBottom: "2.5rem" }}>
-        <h1 style={{ fontSize: "2rem", fontWeight: 700 }}>Hermes Blog</h1>
-        <p style={{ color: "var(--muted)", marginTop: "0.5rem" }}>
-          面向 AI/ML 从业者的技术博客
-        </p>
+    <main className="mx-auto max-w-3xl px-6 py-16">
+      <header className="mb-12">
+        <h1 className="text-3xl font-bold tracking-tight">Hermes Blog</h1>
+        <p className="mt-2 text-muted-foreground">面向 AI/ML 从业者的技术博客</p>
       </header>
 
-      <section>
+      <section className="grid gap-6">
         {posts.map((post) => (
-          <article
+          <Link
             key={post.slug}
-            style={{
-              padding: "1rem 0",
-              borderBottom: "1px solid var(--border)",
-            }}
+            href={`/posts/${post.slug}`}
+            className="group block rounded-xl border border-border bg-card p-6 transition-all duration-200 hover:-translate-y-0.5 hover:border-accent hover:shadow-lg"
           >
-            <time style={{ color: "var(--muted)", fontSize: "0.875rem" }}>
-              {post.meta.date}
-            </time>
-            <h2 style={{ fontSize: "1.25rem", fontWeight: 600, margin: "0.25rem 0" }}>
-              <Link href={`/posts/${post.slug}`} style={{ color: "inherit", textDecoration: "none" }}>
+            <article>
+              <time className="text-sm text-muted-foreground">
+                {post.meta.date}
+              </time>
+              <h2 className="mt-2 text-xl font-semibold leading-snug text-foreground transition-colors group-hover:text-accent">
                 {post.meta.title}
-              </Link>
-            </h2>
-            {post.meta.description && (
-              <p style={{ color: "var(--muted)", fontSize: "0.9rem", margin: "0.25rem 0 0" }}>
-                {cleanDescription(post.meta.description)}
-              </p>
-            )}
-            <div style={{ marginTop: "0.5rem" }}>
-              {post.meta.tags.map((tag) => (
-                <span
-                  key={tag}
-                  style={{
-                    fontSize: "0.75rem",
-                    background: "rgba(127,127,127,0.15)",
-                    padding: "0.15rem 0.5rem",
-                    borderRadius: "999px",
-                    marginRight: "0.4rem",
-                  }}
-                >
-                  {tag}
-                </span>
-              ))}
-            </div>
-          </article>
+              </h2>
+              {post.meta.description && (
+                <p className="mt-3 line-clamp-3 text-[0.925rem] text-muted-foreground">
+                  {cleanDescription(post.meta.description)}
+                </p>
+              )}
+              <div className="mt-4 flex flex-wrap gap-2">
+                {post.meta.tags.map((tag) => (
+                  <span
+                    key={tag}
+                    className="rounded-full bg-accent/10 px-2.5 py-0.5 text-xs font-medium text-accent"
+                  >
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            </article>
+          </Link>
         ))}
       </section>
     </main>

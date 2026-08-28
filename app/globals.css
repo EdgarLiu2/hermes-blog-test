@@ -1,12 +1,18 @@
 @import "tailwindcss";
 
-:root {
-  --foreground: #1a1a1a;
-  --background: #ffffff;
-  --muted: #666666;
-  --border: #e5e5e5;
-  --accent: #2563eb;
+/* 将现有 CSS 变量注册为 Tailwind 颜色 token，供背景/文字/边框等类使用。
+   @theme inline 让 Tailwind 把 var(--x) 内联展开，从而能生成带透明度的 utility（如 bg-accent/10）。 */
+@theme inline {
+  --color-foreground: var(--foreground);
+  --color-background: var(--background);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted);
+  --color-border: var(--border);
+  --color-accent: var(--accent);
+  --color-card: var(--card);
 }
+
+
 
 @media (prefers-color-scheme: dark) {
   :root {
@@ -15,8 +21,10 @@
     --muted: #9ca3af;
     --border: #333333;
     --accent: #60a5fa;
+    --card: #1c1c1c;
   }
 }
+
 
 body {
   color: var(--foreground);

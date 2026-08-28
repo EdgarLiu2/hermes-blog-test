@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import Link from "next/link";
 import { notFound } from "next/navigation";
 import { getAllSlugs, getPostBySlug } from "@/lib/posts";
 import { MDXContent } from "./mdx-content";
@@ -40,28 +41,33 @@ export default async function PostPage({
   if (!post) notFound();
 
   return (
-    <main style={{ maxWidth: 720, margin: "0 auto", padding: "3rem 1.5rem" }}>
+    <main className="mx-auto max-w-3xl px-6 py-16">
+      {/* 返回博客首页链接 */}
+      <nav className="mb-10">
+        <Link
+          href="/"
+          className="inline-flex items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-accent"
+        >
+          <span aria-hidden="true">←</span>
+          返回博客首页
+        </Link>
+      </nav>
+
       <article>
-        <header style={{ marginBottom: "2rem" }}>
-          <h1 style={{ fontSize: "2rem", fontWeight: 700, lineHeight: 1.3 }}>
+        <header className="mb-10">
+          <h1 className="text-3xl font-bold leading-tight tracking-tight">
             {post.meta.title}
           </h1>
-          <div style={{ color: "var(--muted)", fontSize: "0.875rem", marginTop: "0.75rem" }}>
+          <div className="mt-4 flex items-center gap-2 text-sm text-muted-foreground">
             <time>{post.meta.date}</time>
-            <span style={{ margin: "0 0.5rem" }}>·</span>
+            <span aria-hidden="true">·</span>
             <span>{post.meta.author}</span>
           </div>
-          <div style={{ marginTop: "0.75rem" }}>
+          <div className="mt-5 flex flex-wrap gap-2">
             {post.meta.tags.map((tag) => (
               <span
                 key={tag}
-                style={{
-                  fontSize: "0.75rem",
-                  background: "rgba(127,127,127,0.15)",
-                  padding: "0.15rem 0.5rem",
-                  borderRadius: "999px",
-                  marginRight: "0.4rem",
-                }}
+                className="rounded-full bg-accent/10 px-2.5 py-0.5 text-xs font-medium text-accent"
               >
                 {tag}
               </span>
